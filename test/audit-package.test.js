@@ -16,7 +16,7 @@ const auditScript = fileURLToPath(new URL('../scripts/audit-package.mjs', import
 async function executeNpm(args, cwd) {
   const audit = await auditModulePromise;
   const invocation = audit.buildNpmInvocation(args);
-  return execFileAsync(invocation.command, invocation.args, { cwd });
+  return execFileAsync(invocation.command, invocation.args, { cwd, ...invocation.options });
 }
 
 function firstPackResult(value) {
@@ -61,6 +61,7 @@ test('validates and invokes the regular npm cmd shim on Windows', async function
         '/c',
         '""C:\\Temporary Folder\\agentcommunity-mcp.cmd" "--help""',
       ],
+      options: { windowsVerbatimArguments: true },
     };
     assert.deepEqual(
       audit.buildComSpecInvocation(
@@ -87,6 +88,7 @@ test('validates and invokes the regular npm cmd shim on Windows', async function
       {
         command: 'C:\\Windows\\cmd.exe',
         args: ['/d', '/s', '/c', '""npm.cmd" "pack" "--json""'],
+        options: { windowsVerbatimArguments: true },
       },
     );
     assert.deepEqual(
@@ -124,6 +126,47 @@ test('validates and invokes the regular npm cmd shim on Windows', async function
     );
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test('rejects mismatched bytes before attempting to parse a corrupt tarball', async function () {
+  const artifactDirectory = await mkdtemp(join(tmpdir(), 'agentcommunity-mcp-corrupt-artifact-'));
+  const sourceManifest = JSON.parse(
+    await readFile(new URL('../package.json', import.meta.url), 'utf8'),
+  );
+  const filename = `agentcommunity-mcp-${sourceManifest.version}.tgz`;
+  const tarballPath = join(artifactDirectory, filename);
+  const packResultPath = join(artifactDirectory, 'pack-result.json');
+  const expectedBytes = Buffer.from('different artifact bytes');
+  const packResult = [{
+    name: sourceManifest.name,
+    version: sourceManifest.version,
+    filename,
+    shasum: createHash('sha1').update(expectedBytes).digest('hex'),
+    integrity: `sha512-${createHash('sha512').update(expectedBytes).digest('base64')}`,
+    files: [
+      { path: 'LICENSE', size: 1 },
+      { path: 'README.md', size: 1 },
+      { path: 'SECURITY.md', size: 1 },
+      { path: 'bin.js', size: 1 },
+      { path: 'package.json', size: 1 },
+    ],
+  }];
+
+  try {
+    await writeFile(tarballPath, 'not a tarball');
+    await writeFile(packResultPath, JSON.stringify(packResult));
+
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [auditScript, '--tarball', tarballPath, '--pack-result', packResultPath],
+        { cwd: packageRoot, maxBuffer: 16 * 1024 * 1024 },
+      ),
+      /Tarball SHA-1 does not match pack-result JSON/,
+    );
+  } finally {
+    await rm(artifactDirectory, { recursive: true, force: true });
   }
 });
 

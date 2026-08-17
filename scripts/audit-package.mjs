@@ -144,6 +144,7 @@ export function buildComSpecInvocation(executable, args, environment = process.e
   return {
     command: environment.ComSpec ?? environment.COMSPEC ?? 'cmd.exe',
     args: ['/d', '/s', '/c', commandLine],
+    options: { windowsVerbatimArguments: true },
   };
 }
 
@@ -207,9 +208,10 @@ export function parseAuditArguments(argv, cwd = process.cwd()) {
   return { mode: 'provided', tarballPath, packResultPath };
 }
 
-function command(commandName, args, cwd) {
+function command(commandName, args, cwd, options = {}) {
   const result = spawnSync(commandName, args, {
     cwd,
+    ...options,
     encoding: 'utf8',
     maxBuffer: 16 * 1024 * 1024,
   });
@@ -226,7 +228,7 @@ function command(commandName, args, cwd) {
 
 function npmCommand(args, cwd) {
   const invocation = buildNpmInvocation(args);
-  return command(invocation.command, invocation.args, cwd);
+  return command(invocation.command, invocation.args, cwd, invocation.options);
 }
 
 function invalidPackOutput(message) {
@@ -356,6 +358,19 @@ async function main(argv = process.argv.slice(2)) {
       );
     }
 
+    const tarball = await readFile(tarballPath);
+    const tarballSha256 = createHash('sha256').update(tarball).digest('hex');
+    assert.equal(
+      createHash('sha1').update(tarball).digest('hex'),
+      packResult.shasum,
+      'Tarball SHA-1 does not match pack-result JSON',
+    );
+    assert.equal(
+      `sha512-${createHash('sha512').update(tarball).digest('base64')}`,
+      packResult.integrity,
+      'Tarball integrity does not match pack-result JSON',
+    );
+
     const tarInventory = command('tar', ['-tzf', tarballPath], repositoryRoot)
       .split(/\r?\n/)
       .filter(function (entry) { return entry.length > 0; })
@@ -382,19 +397,6 @@ async function main(argv = process.argv.slice(2)) {
       }
       if (containsJwt(content)) throw new Error(`Possible JWT in packed file ${packedPath}.`);
     }
-
-    const tarball = await readFile(tarballPath);
-    const tarballSha256 = createHash('sha256').update(tarball).digest('hex');
-    assert.equal(
-      createHash('sha1').update(tarball).digest('hex'),
-      packResult.shasum,
-      'Tarball SHA-1 does not match pack-result JSON',
-    );
-    assert.equal(
-      `sha512-${createHash('sha512').update(tarball).digest('base64')}`,
-      packResult.integrity,
-      'Tarball integrity does not match pack-result JSON',
-    );
 
     await writeFile(
       join(installDirectory, 'package.json'),
@@ -430,6 +432,7 @@ async function main(argv = process.argv.slice(2)) {
     const helpInvocation = buildShimHelpInvocation(installedShim);
     const help = spawnSync(helpInvocation.command, helpInvocation.args, {
       cwd: installDirectory,
+      ...helpInvocation.options,
       encoding: 'utf8',
       maxBuffer: 1024 * 1024,
     });

@@ -23,6 +23,7 @@ function buildComSpecInvocation(executable, args, environment) {
   return {
     command: environment.ComSpec ?? environment.COMSPEC ?? 'cmd.exe',
     args: ['/d', '/s', '/c', `"${commandLine}"`],
+    options: { windowsVerbatimArguments: true },
   };
 }
 
@@ -73,6 +74,7 @@ test('builds portable npm invocations for the npm CLI and Windows cmd fallback',
         '/c',
         '""npm.cmd" "pack" "--pack-destination" "C:\\Temp Root & Cache\\pack""',
       ],
+      options: { windowsVerbatimArguments: true },
     },
   );
 });
@@ -90,6 +92,7 @@ test('builds the installed Windows shim invocation through ComSpec with robust q
         '/c',
         '""C:\\Temp Root & Cache\\node_modules\\.bin\\agentcommunity-mcp.cmd" "--help""',
       ],
+      options: { windowsVerbatimArguments: true },
     },
   );
   assert.deepEqual(
@@ -116,6 +119,7 @@ async function withPackedInstall(callback) {
     ]);
     const packed = await execFileAsync(packInvocation.command, packInvocation.args, {
       cwd: packageRoot,
+      ...packInvocation.options,
     });
     const [{ filename }] = JSON.parse(packed.stdout);
     const installInvocation = buildNpmInvocation([
@@ -127,6 +131,7 @@ async function withPackedInstall(callback) {
     ]);
     await execFileAsync(installInvocation.command, installInvocation.args, {
       cwd: clientDirectory,
+      ...installInvocation.options,
     });
 
     await callback(clientDirectory);
@@ -162,6 +167,7 @@ test('packed package emits help through the installed npm shim', async function 
     const helpInvocation = buildInstalledShimInvocation(shimPath);
     const result = await execFileAsync(helpInvocation.command, helpInvocation.args, {
       cwd: clientDirectory,
+      ...helpInvocation.options,
     });
 
     assert.match(result.stdout, /Official Agent Community MCP connector/);
