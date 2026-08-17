@@ -1,6 +1,6 @@
 {
   "name": "@agentcommunity/mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Official Agent Community MCP connector for stdio clients; bridges to the hosted Streamable HTTP server at https://agentcommunity.org/mcp",
   "type": "module",
   "exports": {},
