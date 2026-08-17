@@ -132,17 +132,39 @@ export async function validateInstalledShimTarget(
   return resolvedShim;
 }
 
+function quoteCmdArgument(argument) {
+  if (argument.includes('"')) {
+    throw new Error('Windows command arguments must not contain double quotes.');
+  }
+  return `"${argument}"`;
+}
+
+export function buildComSpecInvocation(executable, args, environment = process.env) {
+  const commandLine = `"${[executable, ...args].map(quoteCmdArgument).join(' ')}"`;
+  return {
+    command: environment.ComSpec ?? environment.COMSPEC ?? 'cmd.exe',
+    args: ['/d', '/s', '/c', commandLine],
+  };
+}
+
+export function buildNpmInvocation(
+  args,
+  platform = process.platform,
+  environment = process.env,
+) {
+  if (typeof environment.npm_execpath === 'string' && environment.npm_execpath.length > 0) {
+    return { command: process.execPath, args: [environment.npm_execpath, ...args] };
+  }
+  if (platform === 'win32') return buildComSpecInvocation('npm.cmd', args, environment);
+  return { command: 'npm', args };
+}
+
 export function buildShimHelpInvocation(
   shimPath,
   platform = process.platform,
   environment = process.env,
 ) {
-  if (platform === 'win32') {
-    return {
-      command: environment.ComSpec ?? environment.COMSPEC ?? 'cmd.exe',
-      args: ['/d', '/s', '/c', `"${shimPath}" --help`],
-    };
-  }
+  if (platform === 'win32') return buildComSpecInvocation(shimPath, ['--help'], environment);
 
   return { command: shimPath, args: ['--help'] };
 }
@@ -203,11 +225,8 @@ function command(commandName, args, cwd) {
 }
 
 function npmCommand(args, cwd) {
-  const npmExecPath = process.env.npm_execpath;
-
-  return npmExecPath === undefined
-    ? command(process.platform === 'win32' ? 'npm.cmd' : 'npm', args, cwd)
-    : command(process.execPath, [npmExecPath, ...args], cwd);
+  const invocation = buildNpmInvocation(args);
+  return command(invocation.command, invocation.args, cwd);
 }
 
 function invalidPackOutput(message) {

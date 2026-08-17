@@ -14,20 +14,9 @@ const packageRoot = fileURLToPath(new URL('../', import.meta.url));
 const auditScript = fileURLToPath(new URL('../scripts/audit-package.mjs', import.meta.url));
 
 async function executeNpm(args, cwd) {
-  if (process.env.npm_execpath !== undefined) {
-    return execFileAsync(process.execPath, [process.env.npm_execpath, ...args], { cwd });
-  }
-  if (process.platform === 'win32') {
-    const commandLine = ['npm', ...args]
-      .map(function (argument) { return `"${argument.replaceAll('"', '""')}"`; })
-      .join(' ');
-    return execFileAsync(
-      process.env.ComSpec ?? process.env.COMSPEC ?? 'cmd.exe',
-      ['/d', '/s', '/c', commandLine],
-      { cwd },
-    );
-  }
-  return execFileAsync('npm', args, { cwd });
+  const audit = await auditModulePromise;
+  const invocation = audit.buildNpmInvocation(args);
+  return execFileAsync(invocation.command, invocation.args, { cwd });
 }
 
 function firstPackResult(value) {
@@ -38,6 +27,8 @@ test('validates and invokes the regular npm cmd shim on Windows', async function
   const audit = await auditModulePromise;
   assert.equal(typeof audit.installedShimName, 'function');
   assert.equal(typeof audit.validateInstalledShimTarget, 'function');
+  assert.equal(typeof audit.buildComSpecInvocation, 'function');
+  assert.equal(typeof audit.buildNpmInvocation, 'function');
   assert.equal(typeof audit.buildShimHelpInvocation, 'function');
 
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'agentcommunity-mcp-windows-shim-'));
@@ -61,11 +52,52 @@ test('validates and invokes the regular npm cmd shim on Windows', async function
       await audit.validateInstalledShimTarget(shimPath, targetPath, 'win32'),
       await realpath(targetPath),
     );
+    const spacedShimPath = 'C:\\Temporary Folder\\agentcommunity-mcp.cmd';
+    const expectedCmdInvocation = {
+      command: 'C:\\Windows\\cmd.exe',
+      args: [
+        '/d',
+        '/s',
+        '/c',
+        '""C:\\Temporary Folder\\agentcommunity-mcp.cmd" "--help""',
+      ],
+    };
     assert.deepEqual(
-      audit.buildShimHelpInvocation(shimPath, 'win32', { ComSpec: 'C:\\Windows\\cmd.exe' }),
+      audit.buildComSpecInvocation(
+        spacedShimPath,
+        ['--help'],
+        { ComSpec: 'C:\\Windows\\cmd.exe' },
+      ),
+      expectedCmdInvocation,
+    );
+    assert.deepEqual(
+      audit.buildShimHelpInvocation(
+        spacedShimPath,
+        'win32',
+        { ComSpec: 'C:\\Windows\\cmd.exe' },
+      ),
+      expectedCmdInvocation,
+    );
+    assert.deepEqual(
+      audit.buildNpmInvocation(
+        ['pack', '--json'],
+        'win32',
+        { ComSpec: 'C:\\Windows\\cmd.exe' },
+      ),
       {
         command: 'C:\\Windows\\cmd.exe',
-        args: ['/d', '/s', '/c', `"${shimPath}" --help`],
+        args: ['/d', '/s', '/c', '""npm.cmd" "pack" "--json""'],
+      },
+    );
+    assert.deepEqual(
+      audit.buildNpmInvocation(
+        ['install'],
+        'win32',
+        { npm_execpath: 'C:\\Program Files\\npm-cli.js' },
+      ),
+      {
+        command: process.execPath,
+        args: ['C:\\Program Files\\npm-cli.js', 'install'],
       },
     );
     assert.deepEqual(
