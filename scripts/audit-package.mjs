@@ -25,6 +25,10 @@ const expectedRepository = {
 };
 const expectedEngines = { node: '>=20.18.1' };
 const expectedDependencies = { 'mcp-remote': '0.1.38' };
+const expectedScripts = {
+  test: 'node --test',
+  'package:audit': 'node scripts/audit-package.mjs',
+};
 const hostedMcpUrl = 'https://agentcommunity.org/mcp';
 const brandedHeading = 'Official Agent Community MCP connector';
 const secretPatterns = [
@@ -143,6 +147,44 @@ export function buildShimHelpInvocation(
   return { command: shimPath, args: ['--help'] };
 }
 
+export function parseAuditArguments(argv, cwd = process.cwd()) {
+  if (argv.length === 0) return { mode: 'pack' };
+
+  let tarball;
+  let packResult;
+  for (let index = 0; index < argv.length; index += 2) {
+    const flag = argv[index];
+    const value = argv[index + 1];
+    if (flag !== '--tarball' && flag !== '--pack-result') {
+      throw new Error(`Unknown package audit argument: ${flag ?? '(missing)'}.`);
+    }
+    if (typeof value !== 'string' || value.length === 0 || value.startsWith('--')) {
+      throw new Error(`Package audit argument ${flag} requires a path value.`);
+    }
+    if (flag === '--tarball') {
+      if (tarball !== undefined) throw new Error('Package audit argument --tarball was repeated.');
+      tarball = value;
+    } else {
+      if (packResult !== undefined) {
+        throw new Error('Package audit argument --pack-result was repeated.');
+      }
+      packResult = value;
+    }
+  }
+
+  if (tarball === undefined || packResult === undefined) {
+    throw new Error('Explicit package audit requires both --tarball and --pack-result.');
+  }
+
+  const tarballPath = resolve(cwd, tarball);
+  const packResultPath = resolve(cwd, packResult);
+  if (tarballPath === packResultPath) {
+    throw new Error('Tarball and pack-result paths must be distinct.');
+  }
+
+  return { mode: 'provided', tarballPath, packResultPath };
+}
+
 function command(commandName, args, cwd) {
   const result = spawnSync(commandName, args, {
     cwd,
@@ -172,7 +214,7 @@ function invalidPackOutput(message) {
   throw new Error(`Invalid npm pack JSON output: ${message}.`);
 }
 
-function normalizePackResult(value, expectedVersion) {
+export function normalizePackResult(value, expectedVersion) {
   let candidate;
 
   if (Array.isArray(value)) {
@@ -200,6 +242,12 @@ function normalizePackResult(value, expectedVersion) {
   ) {
     invalidPackOutput('tarball filename is not the expected package filename');
   }
+  if (!/^[a-f0-9]{40}$/.test(candidate.shasum)) {
+    invalidPackOutput('result shasum is malformed');
+  }
+  if (!/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(candidate.integrity)) {
+    invalidPackOutput('result integrity is malformed');
+  }
   if (!Array.isArray(candidate.files)) invalidPackOutput('result files are missing');
   if (candidate.files.some(function (file) {
     return !isRecord(file)
@@ -215,7 +263,7 @@ function normalizePackResult(value, expectedVersion) {
   return candidate;
 }
 
-function assertExactManifest(manifest, expectedVersion, source) {
+export function assertExactManifest(manifest, expectedVersion, source) {
   assert.equal(manifest.name, expectedName, `${source} package name drift detected`);
   assert.equal(manifest.version, expectedVersion, `${source} package version drift detected`);
   assert.deepEqual(manifest.bin, expectedBin, `${source} binary mapping drift detected`);
@@ -234,18 +282,17 @@ function assertExactManifest(manifest, expectedVersion, source) {
     `${source} dependency boundary drift detected`,
   );
   assert.deepEqual(manifest.exports, {}, `${source} exports must be an exact empty map`);
-
-  for (const scriptName of ['preinstall', 'install', 'postinstall']) {
-    assert.equal(
-      manifest.scripts?.[scriptName],
-      undefined,
-      `${source} manifest must not contain a ${scriptName} script`,
-    );
-  }
+  assert.deepEqual(manifest.scripts, expectedScripts, `${source} scripts map drift detected`);
 }
 
-async function main() {
+export function assertCompleteManifest(manifest, sourceManifest, source) {
+  assertExactManifest(manifest, sourceManifest.version, source);
+  assert.deepEqual(manifest, sourceManifest, `${source} complete manifest drift detected`);
+}
+
+async function main(argv = process.argv.slice(2)) {
   const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
+  const auditArguments = parseAuditArguments(argv);
   const sourceManifest = JSON.parse(await readFile(join(repositoryRoot, 'package.json'), 'utf8'));
   if (typeof sourceManifest.version !== 'string' || sourceManifest.version.length === 0) {
     throw new Error('Source package version is missing.');
@@ -256,22 +303,54 @@ async function main() {
   let installDirectory;
 
   try {
-    packDirectory = await mkdtemp(join(tmpdir(), 'agentcommunity-mcp-pack-'));
     installDirectory = await mkdtemp(join(tmpdir(), 'agentcommunity-mcp-install-'));
 
-    const packOutput = npmCommand(
-      ['pack', '--json', '--pack-destination', packDirectory],
-      repositoryRoot,
-    );
+    let packOutput;
+    let tarballPath;
+    if (auditArguments.mode === 'pack') {
+      packDirectory = await mkdtemp(join(tmpdir(), 'agentcommunity-mcp-pack-'));
+      packOutput = npmCommand(
+        ['pack', '--json', '--pack-destination', packDirectory],
+        repositoryRoot,
+      );
+    } else {
+      packOutput = await readFile(auditArguments.packResultPath, 'utf8');
+    }
+
     const packResult = normalizePackResult(JSON.parse(packOutput), sourceManifest.version);
     const inventory = packResult.files.map(function (file) { return file.path; }).sort();
     assert.deepEqual(inventory, expectedFiles, 'Unexpected package inventory');
 
-    const tarballPath = join(packDirectory, packResult.filename);
+    if (auditArguments.mode === 'pack') {
+      tarballPath = join(packDirectory, packResult.filename);
+    } else {
+      tarballPath = auditArguments.tarballPath;
+      assert.equal(
+        basename(tarballPath),
+        packResult.filename,
+        'Provided tarball filename does not match pack-result JSON',
+      );
+      assert.equal(
+        (await lstat(tarballPath)).isFile(),
+        true,
+        'Provided tarball is not a regular file',
+      );
+    }
+
+    const tarInventory = command('tar', ['-tzf', tarballPath], repositoryRoot)
+      .split(/\r?\n/)
+      .filter(function (entry) { return entry.length > 0; })
+      .map(function (entry) {
+        assert.ok(entry.startsWith('package/'), `Unexpected tarball entry root: ${entry}`);
+        return entry.slice('package/'.length);
+      })
+      .sort();
+    assert.deepEqual(tarInventory, expectedFiles, 'Unexpected tarball inventory');
+
     const packedManifest = JSON.parse(
       command('tar', ['-xOf', tarballPath, 'package/package.json'], repositoryRoot),
     );
-    assertExactManifest(packedManifest, sourceManifest.version, 'Packed tarball');
+    assertCompleteManifest(packedManifest, sourceManifest, 'Packed tarball');
 
     for (const packedPath of inventory) {
       const content = command(
@@ -287,6 +366,16 @@ async function main() {
 
     const tarball = await readFile(tarballPath);
     const tarballSha256 = createHash('sha256').update(tarball).digest('hex');
+    assert.equal(
+      createHash('sha1').update(tarball).digest('hex'),
+      packResult.shasum,
+      'Tarball SHA-1 does not match pack-result JSON',
+    );
+    assert.equal(
+      `sha512-${createHash('sha512').update(tarball).digest('base64')}`,
+      packResult.integrity,
+      'Tarball integrity does not match pack-result JSON',
+    );
 
     await writeFile(
       join(installDirectory, 'package.json'),
@@ -306,7 +395,7 @@ async function main() {
     const installedManifest = JSON.parse(
       await readFile(join(installedPackageRoot, 'package.json'), 'utf8'),
     );
-    assertExactManifest(installedManifest, sourceManifest.version, 'Installed package');
+    assertCompleteManifest(installedManifest, sourceManifest, 'Installed package');
 
     const installedShim = join(
       installDirectory,
@@ -331,6 +420,7 @@ async function main() {
     assert.ok(help.stdout.includes(hostedMcpUrl), 'Hosted MCP URL is missing from help');
 
     process.stdout.write(`${JSON.stringify({
+      artifact_source: auditArguments.mode === 'pack' ? 'packed' : 'provided',
       filename: packResult.filename,
       sha256: tarballSha256,
       files: inventory,

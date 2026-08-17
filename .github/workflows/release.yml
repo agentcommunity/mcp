@@ -68,38 +68,30 @@ jobs:
 
       - run: npm ci
       - run: npm test
-      - run: npm run package:audit
 
-      - name: Pack the exact release artifact
-        id: pack
+      - name: Pack, audit, and publish the exact release artifact
         run: |
           set -euo pipefail
-          npm pack --json > pack-result.json
+          artifact_dir="$(mktemp -d "$RUNNER_TEMP/agentcommunity-mcp-release.XXXXXX")"
+          trap 'rm -rf -- "$artifact_dir"' EXIT
+          pack_result="$artifact_dir/pack-result.json"
+          npm pack --json --pack-destination "$artifact_dir" > "$pack_result"
           tarball="$(
-            node --input-type=module <<'NODE'
-          import { readFileSync } from "node:fs";
-          import { basename } from "node:path";
+            PACK_RESULT="$pack_result" ARTIFACT_DIR="$artifact_dir" node --input-type=module <<'NODE'
+          import { existsSync, readFileSync } from "node:fs";
+          import { join } from "node:path";
+
+          import { normalizePackResult } from "./scripts/audit-package.mjs";
 
           const manifest = JSON.parse(readFileSync("package.json", "utf8"));
-          const results = JSON.parse(readFileSync("pack-result.json", "utf8"));
-          if (!Array.isArray(results) || results.length !== 1) {
-            throw new Error(`Expected one packed artifact, received ${results.length}`);
-          }
+          const results = JSON.parse(readFileSync(process.env.PACK_RESULT, "utf8"));
+          const result = normalizePackResult(results, manifest.version);
+          const tarball = join(process.env.ARTIFACT_DIR, result.filename);
+          if (!existsSync(tarball)) throw new Error("Packed artifact is missing");
 
-          const [result] = results;
-          if (result.name !== manifest.name || result.version !== manifest.version) {
-            throw new Error("Packed artifact identity does not match package.json");
-          }
-          if (typeof result.filename !== "string" || basename(result.filename) !== result.filename) {
-            throw new Error("Packed artifact filename is missing or unsafe");
-          }
-
-          process.stdout.write(result.filename);
+          process.stdout.write(tarball);
           NODE
           )"
-          test -f "$tarball"
           sha256sum "$tarball"
-          printf 'tarball=%s\n' "$tarball" >> "$GITHUB_OUTPUT"
-
-      - name: Publish the exact artifact with OIDC provenance
-        run: npm publish "${{ steps.pack.outputs.tarball }}" --access public --provenance
+          npm run package:audit -- --tarball "$tarball" --pack-result "$pack_result"
+          npm publish "$tarball" --access public --provenance
