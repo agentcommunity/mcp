@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { lstat, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const expectedName = '@agentcommunity/mcp';
@@ -25,7 +25,6 @@ const expectedRepository = {
 };
 const expectedEngines = { node: '>=20.18.1' };
 const expectedDependencies = { 'mcp-remote': '0.1.38' };
-const installedShimRelativePath = 'node_modules/.bin/agentcommunity-mcp';
 const hostedMcpUrl = 'https://agentcommunity.org/mcp';
 const brandedHeading = 'Official Agent Community MCP connector';
 const secretPatterns = [
@@ -34,14 +33,107 @@ const secretPatterns = [
   { label: 'GitHub token', pattern: /\bgh[opusr]_[A-Za-z0-9]{20,}\b/ },
   { label: 'GitHub token', pattern: /\bgithub_pat_[A-Za-z0-9_]{20,}\b/ },
   { label: 'Stripe key', pattern: /\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}\b/ },
-  {
-    label: 'JWT',
-    pattern: /\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\b/,
-  },
 ];
 
 function isRecord(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function decodeBase64UrlJson(segment) {
+  try {
+    const decoded = Buffer.from(segment, 'base64url');
+    if (decoded.toString('base64url') !== segment) return undefined;
+    return JSON.parse(decoded.toString('utf8'));
+  } catch {
+    return undefined;
+  }
+}
+
+export function containsJwt(content) {
+  const candidatePattern = /(?<![A-Za-z0-9_-])(eyJ[A-Za-z0-9_-]*)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{8,})(?![A-Za-z0-9_-])/g;
+
+  for (const match of content.matchAll(candidatePattern)) {
+    const header = decodeBase64UrlJson(match[1]);
+    const payload = decodeBase64UrlJson(match[2]);
+    const signature = Buffer.from(match[3], 'base64url');
+    const hasCanonicalSignature = signature.toString('base64url') === match[3];
+
+    if (
+      isRecord(header)
+      && typeof header.alg === 'string'
+      && header.alg.length > 0
+      && isRecord(payload)
+      && hasCanonicalSignature
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function installedShimName(platform = process.platform) {
+  return platform === 'win32' ? 'agentcommunity-mcp.cmd' : 'agentcommunity-mcp';
+}
+
+export async function validateInstalledShimTarget(
+  shimPath,
+  expectedTargetPath,
+  platform = process.platform,
+) {
+  const expectedTarget = await realpath(expectedTargetPath);
+
+  if (platform === 'win32') {
+    assert.equal(
+      (await lstat(shimPath)).isFile(),
+      true,
+      'Clean-install Windows executable shim is not a regular wrapper file',
+    );
+    const expectedReference = relative(dirname(shimPath), expectedTargetPath).replaceAll('\\', '/');
+    const wrapperLines = (await readFile(shimPath, 'utf8'))
+      .replaceAll('\\', '/')
+      .split(/\r?\n/);
+    const invokesExpectedTarget = wrapperLines.some(function (line) {
+      return line.includes(expectedReference)
+        && /%dp0%/i.test(line)
+        && /%_prog%|\bnode(?:\.exe)?\b/i.test(line)
+        && line.includes('%*');
+    });
+    assert.equal(
+      invokesExpectedTarget,
+      true,
+      'Clean-install Windows executable shim does not invoke the packed bin.js',
+    );
+    return expectedTarget;
+  }
+
+  assert.equal(
+    (await lstat(shimPath)).isSymbolicLink(),
+    true,
+    'Clean-install executable shim is not a symbolic link',
+  );
+  const resolvedShim = await realpath(shimPath);
+  assert.equal(
+    resolvedShim,
+    expectedTarget,
+    'Clean-install executable shim does not resolve to the packed bin.js',
+  );
+  return resolvedShim;
+}
+
+export function buildShimHelpInvocation(
+  shimPath,
+  platform = process.platform,
+  environment = process.env,
+) {
+  if (platform === 'win32') {
+    return {
+      command: environment.ComSpec ?? environment.COMSPEC ?? 'cmd.exe',
+      args: ['/d', '/s', '/c', `"${shimPath}" --help`],
+    };
+  }
+
+  return { command: shimPath, args: ['--help'] };
 }
 
 function command(commandName, args, cwd) {
@@ -183,6 +275,7 @@ async function main() {
       for (const { label, pattern } of secretPatterns) {
         if (pattern.test(content)) throw new Error(`Possible ${label} in packed file ${packedPath}.`);
       }
+      if (containsJwt(content)) throw new Error(`Possible JWT in packed file ${packedPath}.`);
     }
 
     const tarball = await readFile(tarballPath);
@@ -208,23 +301,19 @@ async function main() {
     );
     assertExactManifest(installedManifest, sourceManifest.version, 'Installed package');
 
-    const installedShim = join(installDirectory, installedShimRelativePath);
-    assert.equal(
-      (await lstat(installedShim)).isSymbolicLink(),
-      true,
-      'Clean-install executable shim is not a symbolic link',
+    const installedShim = join(
+      installDirectory,
+      'node_modules',
+      '.bin',
+      installedShimName(),
     );
-    const installedShimTarget = await realpath(installedShim);
-    const expectedShimTarget = await realpath(
+    const installedShimTarget = await validateInstalledShimTarget(
+      installedShim,
       join(installedPackageRoot, expectedBin['agentcommunity-mcp']),
     );
-    assert.equal(
-      installedShimTarget,
-      expectedShimTarget,
-      'Clean-install executable shim does not resolve to the packed bin.js',
-    );
 
-    const help = spawnSync(installedShim, ['--help'], {
+    const helpInvocation = buildShimHelpInvocation(installedShim);
+    const help = spawnSync(helpInvocation.command, helpInvocation.args, {
       cwd: installDirectory,
       encoding: 'utf8',
       maxBuffer: 1024 * 1024,
@@ -253,4 +342,9 @@ async function main() {
   }
 }
 
-await main();
+function isMainModule() {
+  return typeof process.argv[1] === 'string'
+    && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+}
+
+if (isMainModule()) await main();
