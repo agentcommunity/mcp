@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish verified package
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Use the trusted-publishing npm CLI
+        run: |
+          npm install --global npm@12.0.2
+          test "$(npm --version)" = "12.0.2"
+
+      - name: Require an exact stable release tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const manifest = JSON.parse(readFileSync("package.json", "utf8"));
+          if (!/^\d+\.\d+\.\d+$/.test(manifest.version)) {
+            throw new Error(`Release version must be stable SemVer, received ${manifest.version}`);
+          }
+
+          const expectedTag = `v${manifest.version}`;
+          if (process.env.RELEASE_TAG !== expectedTag) {
+            throw new Error(`Tag ${process.env.RELEASE_TAG} does not match package version ${expectedTag}`);
+          }
+          NODE
+
+      - run: npm ci
+      - run: npm test
+      - run: npm run package:audit
+
+      - name: Pack the exact release artifact
+        id: pack
+        run: |
+          set -euo pipefail
+          npm pack --json > pack-result.json
+          tarball="$(
+            node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          import { basename } from "node:path";
+
+          const manifest = JSON.parse(readFileSync("package.json", "utf8"));
+          const results = JSON.parse(readFileSync("pack-result.json", "utf8"));
+          if (!Array.isArray(results) || results.length !== 1) {
+            throw new Error(`Expected one packed artifact, received ${results.length}`);
+          }
+
+          const [result] = results;
+          if (result.name !== manifest.name || result.version !== manifest.version) {
+            throw new Error("Packed artifact identity does not match package.json");
+          }
+          if (typeof result.filename !== "string" || basename(result.filename) !== result.filename) {
+            throw new Error("Packed artifact filename is missing or unsafe");
+          }
+
+          process.stdout.write(result.filename);
+          NODE
+          )"
+          test -f "$tarball"
+          sha256sum "$tarball"
+          printf 'tarball=%s\n' "$tarball" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the exact artifact with OIDC provenance
+        run: npm publish "${{ steps.pack.outputs.tarball }}" --access public --provenance
