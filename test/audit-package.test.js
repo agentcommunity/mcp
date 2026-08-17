@@ -47,6 +47,15 @@ test('validates and invokes the regular npm cmd shim on Windows', async function
 
     await writeFile(
       shimPath,
+      '@ECHO off\r\n"%_prog%" "%dp0%\\..\\@agentcommunity\\mcp\\bin.js.evil" %*\r\n',
+    );
+    await assert.rejects(
+      audit.validateInstalledShimTarget(shimPath, targetPath, 'win32'),
+      /does not invoke the packed bin\.js/,
+    );
+
+    await writeFile(
+      shimPath,
       '@ECHO off\r\n"%_prog%" "%dp0%\\..\\other-package\\bin.js" %*\r\n',
     );
     await assert.rejects(

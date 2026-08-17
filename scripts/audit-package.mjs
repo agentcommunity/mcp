@@ -90,14 +90,21 @@ export async function validateInstalledShimTarget(
       'Clean-install Windows executable shim is not a regular wrapper file',
     );
     const expectedReference = relative(dirname(shimPath), expectedTargetPath).replaceAll('\\', '/');
+    const expectedTargetArgument = `%dp0%/${expectedReference}`.toLowerCase();
     const wrapperLines = (await readFile(shimPath, 'utf8'))
       .replaceAll('\\', '/')
       .split(/\r?\n/);
     const invokesExpectedTarget = wrapperLines.some(function (line) {
-      return line.includes(expectedReference)
-        && /%dp0%/i.test(line)
-        && /%_prog%|\bnode(?:\.exe)?\b/i.test(line)
-        && line.includes('%*');
+      const quotedArguments = Array.from(line.matchAll(/"([^"\r\n]*)"/g), function (match) {
+        return match[1];
+      });
+      const programIndex = quotedArguments.findIndex(function (argument) {
+        return /^(?:%_prog%|node(?:\.exe)?)$/i.test(argument);
+      });
+
+      return programIndex !== -1
+        && quotedArguments[programIndex + 1]?.toLowerCase() === expectedTargetArgument
+        && line.trimEnd().endsWith('%*');
     });
     assert.equal(
       invokesExpectedTarget,
