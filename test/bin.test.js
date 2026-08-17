@@ -9,9 +9,19 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 import { applyChildExit, buildInvocation, helpText, installSignalForwarding } from '../bin.js';
+import { normalizePackResult } from '../scripts/audit-package.mjs';
 
 const execFileAsync = promisify(execFile);
 const packageRoot = fileURLToPath(new URL('../', import.meta.url));
+
+function packResultWithShape(value, shape) {
+  const candidate = Array.isArray(value) ? value[0] : Object.values(value)[0];
+  assert.ok(candidate);
+
+  if (shape === 'array') return [candidate];
+  assert.equal(shape, 'package-map');
+  return { '@agentcommunity/mcp': candidate };
+}
 
 function quoteForComSpec(argument) {
   return `"${argument.replaceAll('"', '""')}"`;
@@ -101,7 +111,7 @@ test('builds the installed Windows shim invocation through ComSpec with robust q
   );
 });
 
-async function withPackedInstall(callback) {
+async function withPackedInstall(callback, packResultShape = 'array') {
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'agentcommunity-mcp-'));
   const packDirectory = join(temporaryRoot, 'pack');
   const clientDirectory = join(temporaryRoot, 'client');
@@ -121,7 +131,9 @@ async function withPackedInstall(callback) {
       cwd: packageRoot,
       ...packInvocation.options,
     });
-    const [{ filename }] = JSON.parse(packed.stdout);
+    const shapedPackResult = packResultWithShape(JSON.parse(packed.stdout), packResultShape);
+    const sourceManifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+    const { filename } = normalizePackResult(shapedPackResult, sourceManifest.version);
     const installInvocation = buildNpmInvocation([
       'install',
       '--ignore-scripts',
@@ -158,7 +170,7 @@ test('help describes a connector and never claims to own the server or SDK', fun
   assert.doesNotMatch(helpText, /SDK|implements four tools|MCP server package/);
 });
 
-test('packed package emits help through the installed npm shim', async function () {
+test('packed package emits help through the installed npm shim with array pack JSON', async function () {
   await withPackedInstall(async function (clientDirectory) {
     const shimName = process.platform === 'win32'
       ? 'agentcommunity-mcp.cmd'
@@ -173,7 +185,18 @@ test('packed package emits help through the installed npm shim', async function 
     assert.match(result.stdout, /Official Agent Community MCP connector/);
     assert.match(result.stdout, /https:\/\/agentcommunity\.org\/mcp/);
     assert.equal(result.stderr, '');
-  });
+  }, 'array');
+});
+
+test('packed installation accepts npm 12 package-keyed pack JSON', async function () {
+  await withPackedInstall(async function (clientDirectory) {
+    const installedManifest = JSON.parse(await readFile(
+      join(clientDirectory, 'node_modules', '@agentcommunity', 'mcp', 'package.json'),
+      'utf8',
+    ));
+
+    assert.equal(installedManifest.name, '@agentcommunity/mcp');
+  }, 'package-map');
 });
 
 test('package metadata has no install scripts or SDK export', async function () {
