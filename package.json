@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Official Agent Community MCP connector for stdio clients; bridges to the hosted Streamable HTTP server at https://agentcommunity.org/mcp",
   "type": "module",
+  "exports": {},
   "bin": {
     "agentcommunity-mcp": "bin.js"
   },
