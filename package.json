@@ -1,0 +1,47 @@
+{
+  "name": "@agentcommunity/mcp",
+  "version": "0.1.0",
+  "description": "Official Agent Community MCP connector for stdio clients; bridges to the hosted Streamable HTTP server at https://agentcommunity.org/mcp",
+  "type": "module",
+  "exports": {},
+  "bin": {
+    "agentcommunity-mcp": "bin.js"
+  },
+  "files": [
+    "bin.js",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "package:audit": "node scripts/audit-package.mjs"
+  },
+  "engines": {
+    "node": ">=20.18.1"
+  },
+  "keywords": [
+    "agentcommunity",
+    "agent-community",
+    "mcp",
+    "model-context-protocol",
+    "stdio",
+    "streamable-http",
+    "ai-agents"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agentcommunity/mcp.git"
+  },
+  "homepage": "https://agentcommunity.org/developers",
+  "bugs": {
+    "url": "https://github.com/agentcommunity/mcp/issues"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "mcp-remote": "0.1.38"
+  }
+}

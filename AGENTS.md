@@ -1,0 +1,3 @@
+# Repository boundary
+
+This repository owns only the `@agentcommunity/mcp` stdio connector. The hosted server and its tools live at `https://agentcommunity.org/mcp`; do not copy server logic here. The connector must remain anonymous, fixed-origin, telemetry-free, and dependency-pinned. It must never call a tool during tests or installation, expose an SDK API, accept an alternate remote URL, add install scripts, or store credentials. The sole local-publish exception is the reviewed `0.1.0` bootstrap required to create the npm package before trusted publishing can be attached; it must be deprecated after `0.1.1` is live. Every later publication, including canonical `0.1.1`, uses the tag-only OIDC workflow after `npm test` and `npm run package:audit` pass.
